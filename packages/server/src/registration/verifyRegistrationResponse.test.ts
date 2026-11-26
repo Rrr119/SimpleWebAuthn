@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertFalse, assertObjectMatch, assertRejects } from '@std/assert';
 import { assertSpyCall, assertSpyCalls, resolvesNext, returnsNext, stub } from '@std/testing/mock';
 import { FakeTime } from '@std/testing/time';
+import type { CBORType } from 'tiny-cbor';
 
 import { verifyRegistrationResponse } from './verifyRegistrationResponse.ts';
 import type { RegistrationResponseJSON } from '../types/index.ts';
@@ -16,7 +17,7 @@ import {
 import { _decodeCredentialPublicKeyInternals } from '../helpers/decodeCredentialPublicKey.ts';
 import { _verifySignatureInternals } from '../helpers/verifySignature.ts';
 import { toHash } from '../helpers/toHash.ts';
-import { isoBase64URL, isoUint8Array } from '../helpers/iso/index.ts';
+import { isoBase64URL, isoCBOR, isoUint8Array } from '../helpers/iso/index.ts';
 import { COSEALG, COSEKEYS } from '../helpers/cose.ts';
 import { denoSupportsPQC, FIDO_Conformance_Fake_Root } from '../helpers/tests/index.ts';
 import { SettingsService } from '../services/settingsService.ts';
@@ -114,6 +115,68 @@ Deno.test('should verify Packed (X5C) attestation', async () => {
     verification.registrationInfo?.credential.id,
     '4rrvMciHCkdLQ2HghazIp1sMc8TmV8W8RgoX-x8tqV_1AmlqWACqUK8mBGLandr-htduQKPzgb2yWxOFV56Tlg',
   );
+});
+
+Deno.test('should verify when authenticator AAGUID is in expectedAAGUIDs', async () => {
+  const verification = await verifyRegistrationResponse({
+    response: attestationPacked,
+    expectedChallenge: attestationPackedChallenge,
+    expectedOrigin: 'https://dev.dontneeda.pw',
+    expectedRPID: 'dev.dontneeda.pw',
+    expectedAAGUIDs: [
+      '00000000-0000-0000-0000-000000000000',
+      'adce0002-35bc-c60a-648b-0b25f1f05503',
+    ],
+  });
+
+  assert(verification.verified);
+  assertEquals(verification.registrationInfo?.aaguid, 'adce0002-35bc-c60a-648b-0b25f1f05503');
+});
+
+Deno.test('should verify when authenticator AAGUID matches expectedAAGUIDs regardless of case and dashes', async () => {
+  const verification = await verifyRegistrationResponse({
+    response: attestationPacked,
+    expectedChallenge: attestationPackedChallenge,
+    expectedOrigin: 'https://dev.dontneeda.pw',
+    expectedRPID: 'dev.dontneeda.pw',
+    expectedAAGUIDs: ['ADCE000235BCC60A648B0B25F1F05503'],
+  });
+
+  assert(verification.verified);
+});
+
+Deno.test('should throw when authenticator AAGUID is not in expectedAAGUIDs', async () => {
+  await assertRejects(
+    () =>
+      verifyRegistrationResponse({
+        response: attestationPacked,
+        expectedChallenge: attestationPackedChallenge,
+        expectedOrigin: 'https://dev.dontneeda.pw',
+        expectedRPID: 'dev.dontneeda.pw',
+        expectedAAGUIDs: ['00000000-0000-0000-0000-000000000000'],
+      }),
+    Error,
+    'Unexpected authenticator AAGUID "adce0002-35bc-c60a-648b-0b25f1f05503"',
+  );
+});
+
+Deno.test('should reject Packed attestation with a tampered signature', async () => {
+  const verification = await verifyRegistrationResponse({
+    response: {
+      ...attestationPacked,
+      response: {
+        ...attestationPacked.response,
+        attestationObject: tamperAttestationObjectSignature(
+          attestationPacked.response.attestationObject,
+        ),
+      },
+    },
+    expectedChallenge: attestationPackedChallenge,
+    expectedOrigin: 'https://dev.dontneeda.pw',
+    expectedRPID: 'dev.dontneeda.pw',
+  });
+
+  assertFalse(verification.verified);
 });
 
 Deno.test('should verify None attestation', async () => {
@@ -614,8 +677,7 @@ Deno.test('should validate TPM RSA response (SHA256)', async () => {
       id: 'lGkWHPe88VpnNYgVBxzon_MRR9-gmgODveQ16uM_bPM',
       rawId: 'lGkWHPe88VpnNYgVBxzon_MRR9-gmgODveQ16uM_bPM',
       response: {
-        attestationObject:
-          'o2NmbXRjdHBtZ2F0dFN0bXSmY2FsZzkBAGNzaWdZAQBoZraUgitkw10bZI2MMWDECGf3LgbkX1XoSUhWhxawE8gX1oQdbYbIx-LjtFZkBqp7Nsq8qdeQBGhSJbSbE1wLfP5Xs3d110KmD4LzrCmt_rn3LYQDhDIonft8xJIpAHppEKCxziHMWCPXbntIeQ8pHEZmjBTIN5CJyxHQeUp1LniMQ0CGRknSlE4Av6aHrnoGUgnrsyXmzMn0BWxtdGIhsheAIiBanXGqMdLQ5cGc1HRmGh9U4NrVE-W7nJBLuA5H9K6-t9TfTySYInzr81XEsh6Ei5ijGT2Cc1MmaU4utbB-LyUG9v_oy9EpdOAu4v2jBOBkms0CxrErdWCKl7b5Y3ZlcmMyLjBjeDVjglkEhzCCBIMwggNroAMCAQICDwS6zyQ0LwxSSoQYLc7HVjANBgkqhkiG9w0BAQsFADBBMT8wPQYDVQQDEzZOQ1UtTlRDLUtFWUlELUZGOTkwMzM4RTE4NzA3OUE2Q0Q2QTAzQURDNTcyMzc0NDVGNkE0OUEwHhcNMTgwMjAxMDAwMDAwWhcNMjUwMTMxMjM1OTU5WjAAMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA-IYIfmLnyIHdgjwb2Y-KzMYI2HjN6WseCH8f9N7G3zZpSE9xZxrutKpgoE5wzV2STtkvgd5xikTdIrneWGcNeIW2xhdH2dAVnhL1OiRdLf1CneJHUO78t5-3pmCynqMlUW1VELC-mpaY_kbpNF0Fxn3MhV_-LwtinS5FCvsHpMdKJ_md2e9CDAiI7IqdeK9_sPA5hzDsq9nXsBn0MCcSEppWojwLG3pqmnBWsrLGJCyT5OBi2yNiD0pWMhgromksz6AfFraVDHX8d7E-GoDHedLujnZIm3fAiWDvmdgmZVxX6bxLSWZqWZoSNuJSRasoulVDzDOBHYBWGKLJGgPdMwIDAQABo4IBtzCCAbMwDgYDVR0PAQH_BAQDAgeAMAwGA1UdEwEB_wQCMAAwewYDVR0gAQH_BHEwbzBtBgkrBgEEAYI3FR8wYDBeBggrBgEFBQcCAjBSHlAARgBBAEsARQAgAEYASQBEAE8AIABUAEMAUABBACAAVAByAHUAcwB0AGUAZAAgAFAAbABhAHQAZgBvAHIAbQAgAEkAZABlAG4AdABpAHQAeTAQBgNVHSUECTAHBgVngQUIAzBKBgNVHREBAf8EQDA-pDwwOjE4MA4GBWeBBQIDDAVpZDoxMzAQBgVngQUCAgwHTlBDVDZ4eDAUBgVngQUCAQwLaWQ6RkZGRkYxRDAwHwYDVR0jBBgwFoAUdOhwbuNi8U8_KoCvb3uGHTvHco0wHQYDVR0OBBYEFNiSs3HuWy41m937TQw7EyHG4L3_MHgGCCsGAQUFBwEBBGwwajBoBggrBgEFBQcwAoZcaHR0cHM6Ly9maWRvYWxsaWFuY2UuY28ubnovdHBtcGtpL05DVS1OVEMtS0VZSUQtRkY5OTAzMzhFMTg3MDc5QTZDRDZBMDNBREM1NzIzNzQ0NUY2QTQ5QS5jcnQwDQYJKoZIhvcNAQELBQADggEBAHCSnX7NtGUl1gyIRsprAS1y4TfvEfxpmsrbTruacYBDQ4z5o2uoMYYV2txkvI_pH4kxOolSS9oTz7iNGpKv1yB3x40rMRsiUNs7EyhmH7RE73DOBxlMkr1vHJudiIircI1EifC7FKiDqssKKws8apYE1BZYj6swuG2LOx1LUHd-hP473u0XEv8WbRXY3Pr1I9DODhfMkJDLUKg_l7YI2oowgathLG5_ci0Ad2EHn9122Y1StwSr0r7-cfrTwNxt2bPnZ61hkI_Em7IlCsuol0wak1Ba-UqEWDuTMRmMn3AF59rmIQ2yPdj4ae0DBnSsP13DZj8ihPT68SsaY7HiURBZBgUwggYBMIID6aADAgECAg8EV2dM14jMuwRaKXATKH8wDQYJKoZIhvcNAQELBQAwgb8xCzAJBgNVBAYTAlVTMQswCQYDVQQIDAJNWTESMBAGA1UEBwwJV2FrZWZpZWxkMRYwFAYDVQQKDA1GSURPIEFsbGlhbmNlMQwwCgYDVQQLDANDV0cxNjA0BgNVBAMMLUZJRE8gRmFrZSBUUE0gUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAxODExMC8GCSqGSIb3DQEJARYiY29uZm9ybWFuY2UtdG9vbHNAZmlkb2FsbGlhbmNlLm9yZzAeFw0xNzAyMDEwMDAwMDBaFw0zNTAxMzEyMzU5NTlaMEExPzA9BgNVBAMTNk5DVS1OVEMtS0VZSUQtRkY5OTAzMzhFMTg3MDc5QTZDRDZBMDNBREM1NzIzNzQ0NUY2QTQ5QTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBANc-c30RpQd-_LCoiLJbXz3t_vqciOIovwjez79_DtVgi8G9Ph-tPL-lC0ueFGBMSPcKd_RDdSFe2QCYQd9e0DtiFxra-uWGa0olI1hHI7bK2GzNAZSTKEbwgqpf8vXMQ-7SPajg6PfxSOLH_Nj2yd6tkNkUSdlGtWfY8XGB3n-q--nt3UHdUQWEtgUoTe5abBXsG7MQSuTNoad3v6vk-tLd0W44ivM6pbFqFUHchx8mGLApCpjlVXrfROaCoc9E91hG9B-WNvekJ0dM6kJ658Hy7yscQ6JdqIEolYojCtWaWNmwcfv--OE1Ax_4Ub24gl3hpB9EOcBCzpb4UFmLYUECAwEAAaOCAXUwggFxMAsGA1UdDwQEAwIBhjAWBgNVHSAEDzANMAsGCSsGAQQBgjcVHzAbBgNVHSUEFDASBgkrBgEEAYI3FSQGBWeBBQgDMBIGA1UdEwEB_wQIMAYBAf8CAQAwHQYDVR0OBBYEFHTocG7jYvFPPyqAr297hh07x3KNMB8GA1UdIwQYMBaAFEMRFpma7p1QN8JP_uJbFckJMz8yMGgGA1UdHwRhMF8wXaBboFmGV2h0dHBzOi8vZmlkb2FsbGlhbmNlLmNvLm56L3RwbXBraS9jcmwvRklETyBGYWtlIFRQTSBSb290IENlcnRpZmljYXRlIEF1dGhvcml0eSAyMDE4LmNybDBvBggrBgEFBQcBAQRjMGEwXwYIKwYBBQUHMAKGU2h0dHBzOi8vZmlkb2FsbGlhbmNlLmNvLm56L3RwbXBraS9GSURPIEZha2UgVFBNIFJvb3QgQ2VydGlmaWNhdGUgQXV0aG9yaXR5IDIwMTguY3J0MA0GCSqGSIb3DQEBCwUAA4ICAQBI6GeuxIkeKcmRmFQnkPnkvSybRIJEkzWKa2f00vdBygxtzpkXF2WMHbvuMU3_K3WMFzg2xkSPjM3x_-UxOWGYgVIq8fXUdy2NhmLz4tPI65_nQXpS22rzmXFzsj4x9yS0JF2NnW5xm-O8UdckFdwIZx4Ew_zA-rIF3hqbY4Ejz2AdsbvHJo-WTpu-wWDbBQyR19eqNyYZ6vf9K8DB2JZviIDXdOpkuOJLA40MKMlnhv5K4BZs7mDZIaPzNA_MrcH3_dYXq4tIoGu5Pr1ZNCQ--93XYG1eRbvCgSDYUCRza5AgBGCIhmx2-tqLYeCd9qdy4O9R9c9qRjEThbjnGStYZ0DuB6VCaH1WjiRqyq4VNi9cv15-RoC4zswWwuHee97AAJ_Tx29w6S4Kw9DQR6A0vtw_OHLuOkGH63ns0DACf_h1MvsAMnXXX0Q0P8IpNdBQGvLvrRtRdBNx06NHY1HGZOZ9PdJ6J4mnroB2ln3cMGZG9kyRv2vbwq6sCrYZVYjo3tf4MUtkEY4FijoYbMEDK7VlbTiDPnobhkxI1-bz5DTFnR3IfVybYAeGrBCKSg2UUTPvVgM3WZ-oGlP8W9dg1347hqgxP0vLgDM6cV7rhaFC_ZAf2Et9KLRZSj7lNpJWxHxPyz9mM4w3qFwdgWKwlXl3OQtJRT4Kbs6r3gzB5WdwdWJBcmVhWQE2AAEACwAGBHIAIJ3_y_NsODrmmfuYaNxty4nXFTiEvigDkiwSQVi_rSKuABAAEAgAAAAAAAEArcc8OfVrJfMVj_e8D07tk0g5brIcLIS_BnnRwBztUetpt5zcttYQiyZUGm3y3qUVEP7_ZqtzwplfNbQUqrURlOf2JStEdsnru-ekp09_XOoSgtzwT7f8XYy_3HM-B_-9w7p3wet0GTrXXgLLMFe1jy6jAEaH7jPi0Pyx5zYLgsqQ3MYQA7lKkLaIH8GbJJ01SD8cxnH6p0OxERfQ_QDliEPGIzrE4vwds0vEjskiiBVBsMGHDxuw4ghPkCXCPn6cnUQ5xKulMW5GIAe1yuAZZjypcLl5AQ1_XoJfzGuAe1tlib2Gynr7umfCnOcvjiE6TVQ2CmwSt6isoeMiFKQdTWhjZXJ0SW5mb1it_1RDR4AXACIACxHmjtRNtTcuFCluL4Ssx4OYdRiBkh4w_CKgb4tzx5RTACBUXhu5udUi6GBvBBGsIF5MfQKIIDBdBStwWHfPWQx-FQAAAAFHcBdIVWl7S8aFYKUBc375jTRWVfsAIgALjZ3k0w--c4p2uu7urgJWOfxm0k2XJW4x9EEu0o-HzrIAIgAL_U4kZaJRRPAELcp-Gp4lh_iSA_uUtdHNVhq5vjbJ0KVoYXV0aERhdGFZAWc93EcQ6cCIsinbqJ1WMiC7Ofcimv9GWwplaxr7mor4oEEAAAAep9bZOooNEeialKbPcQcvcwAglGkWHPe88VpnNYgVBxzon_MRR9-gmgODveQ16uM_bPOkAQMDOQEAIFkBAK3HPDn1ayXzFY_3vA9O7ZNIOW6yHCyEvwZ50cAc7VHrabec3LbWEIsmVBpt8t6lFRD-_2arc8KZXzW0FKq1EZTn9iUrRHbJ67vnpKdPf1zqEoLc8E-3_F2Mv9xzPgf_vcO6d8HrdBk6114CyzBXtY8uowBGh-4z4tD8sec2C4LKkNzGEAO5SpC2iB_BmySdNUg_HMZx-qdDsREX0P0A5YhDxiM6xOL8HbNLxI7JIogVQbDBhw8bsOIIT5Alwj5-nJ1EOcSrpTFuRiAHtcrgGWY8qXC5eQENf16CX8xrgHtbZYm9hsp6-7pnwpznL44hOk1UNgpsEreorKHjIhSkHU0hQwEAAQ',
+        attestationObject: attestationTPMSHA256AttestationObject,
         clientDataJSON:
           'eyJvcmlnaW4iOiJodHRwczovL2Rldi5kb250bmVlZGEucHciLCJjaGFsbGVuZ2UiOiIzYTA3Y2Y4NS1lN2I2LTQ0N2YtODI3MC1iMjU0MzNmNjAxOGUiLCJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIn0',
         transports: [],
@@ -647,6 +709,35 @@ Deno.test('should validate TPM RSA response (SHA256)', async () => {
     'https://dev.dontneeda.pw',
   );
   assertEquals(verification.registrationInfo?.rpID, 'dev.dontneeda.pw');
+
+  mockDate.restore();
+});
+
+Deno.test('should reject TPM attestation with a tampered signature', async () => {
+  const mockDate = new FakeTime(new Date('2025-01-30T23:59:59.000Z'));
+
+  const verification = await verifyRegistrationResponse({
+    response: {
+      id: 'lGkWHPe88VpnNYgVBxzon_MRR9-gmgODveQ16uM_bPM',
+      rawId: 'lGkWHPe88VpnNYgVBxzon_MRR9-gmgODveQ16uM_bPM',
+      response: {
+        attestationObject: tamperAttestationObjectSignature(
+          attestationTPMSHA256AttestationObject,
+        ),
+        clientDataJSON:
+          'eyJvcmlnaW4iOiJodHRwczovL2Rldi5kb250bmVlZGEucHciLCJjaGFsbGVuZ2UiOiIzYTA3Y2Y4NS1lN2I2LTQ0N2YtODI3MC1iMjU0MzNmNjAxOGUiLCJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIn0',
+        transports: [],
+      },
+      type: 'public-key',
+      clientExtensionResults: {},
+    },
+    expectedChallenge: '3a07cf85-e7b6-447f-8270-b25433f6018e',
+    expectedOrigin: 'https://dev.dontneeda.pw',
+    expectedRPID: 'dev.dontneeda.pw',
+    requireUserVerification: false,
+  });
+
+  assertFalse(verification.verified);
 
   mockDate.restore();
 });
@@ -1438,6 +1529,32 @@ Deno.test('should raise on trailing slash in origin for expectedOrigin', async (
  * Various Attestations Below
  */
 
+/**
+ * Flip the last byte of the attestation statement signature in an attestation object so that
+ * signature verification should fail
+ */
+function tamperAttestationObjectSignature(attestationObject: string): string {
+  const decoded = decodeAttestationObject(isoBase64URL.toBuffer(attestationObject));
+  const attStmt = decoded.get('attStmt') as unknown as Map<string, CBORType>;
+  const sig = attStmt.get('sig') as Uint8Array;
+
+  const tamperedSig = new Uint8Array(sig);
+  tamperedSig[tamperedSig.length - 1] = tamperedSig[tamperedSig.length - 1] ^ 0xff;
+
+  const tamperedAttStmt = new Map(attStmt);
+  tamperedAttStmt.set('sig', tamperedSig);
+
+  const tamperedAttestationObject = isoCBOR.encode(
+    new Map<string, CBORType>([
+      ['fmt', decoded.get('fmt')],
+      ['attStmt', tamperedAttStmt],
+      ['authData', decoded.get('authData')],
+    ]),
+  );
+
+  return isoBase64URL.fromBuffer(tamperedAttestationObject);
+}
+
 const attestationFIDOU2F: RegistrationResponseJSON = {
   id: 'VHzbxaYaJu2P8m1Y2iHn2gRNHrgK0iYbn9E978L3Qi7Q-chFeicIHwYCRophz5lth2nCgEVKcgWirxlgidgbUQ',
   rawId: 'VHzbxaYaJu2P8m1Y2iHn2gRNHrgK0iYbn9E978L3Qi7Q-chFeicIHwYCRophz5lth2nCgEVKcgWirxlgidgbUQ',
@@ -1528,3 +1645,6 @@ const attestationNone: RegistrationResponseJSON = {
 const attestationNoneChallenge = isoBase64URL.fromUTF8String(
   'hEccPWuziP00H0p5gxh2_u5_PC4NeYgd',
 );
+
+const attestationTPMSHA256AttestationObject =
+  'o2NmbXRjdHBtZ2F0dFN0bXSmY2FsZzkBAGNzaWdZAQBoZraUgitkw10bZI2MMWDECGf3LgbkX1XoSUhWhxawE8gX1oQdbYbIx-LjtFZkBqp7Nsq8qdeQBGhSJbSbE1wLfP5Xs3d110KmD4LzrCmt_rn3LYQDhDIonft8xJIpAHppEKCxziHMWCPXbntIeQ8pHEZmjBTIN5CJyxHQeUp1LniMQ0CGRknSlE4Av6aHrnoGUgnrsyXmzMn0BWxtdGIhsheAIiBanXGqMdLQ5cGc1HRmGh9U4NrVE-W7nJBLuA5H9K6-t9TfTySYInzr81XEsh6Ei5ijGT2Cc1MmaU4utbB-LyUG9v_oy9EpdOAu4v2jBOBkms0CxrErdWCKl7b5Y3ZlcmMyLjBjeDVjglkEhzCCBIMwggNroAMCAQICDwS6zyQ0LwxSSoQYLc7HVjANBgkqhkiG9w0BAQsFADBBMT8wPQYDVQQDEzZOQ1UtTlRDLUtFWUlELUZGOTkwMzM4RTE4NzA3OUE2Q0Q2QTAzQURDNTcyMzc0NDVGNkE0OUEwHhcNMTgwMjAxMDAwMDAwWhcNMjUwMTMxMjM1OTU5WjAAMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA-IYIfmLnyIHdgjwb2Y-KzMYI2HjN6WseCH8f9N7G3zZpSE9xZxrutKpgoE5wzV2STtkvgd5xikTdIrneWGcNeIW2xhdH2dAVnhL1OiRdLf1CneJHUO78t5-3pmCynqMlUW1VELC-mpaY_kbpNF0Fxn3MhV_-LwtinS5FCvsHpMdKJ_md2e9CDAiI7IqdeK9_sPA5hzDsq9nXsBn0MCcSEppWojwLG3pqmnBWsrLGJCyT5OBi2yNiD0pWMhgromksz6AfFraVDHX8d7E-GoDHedLujnZIm3fAiWDvmdgmZVxX6bxLSWZqWZoSNuJSRasoulVDzDOBHYBWGKLJGgPdMwIDAQABo4IBtzCCAbMwDgYDVR0PAQH_BAQDAgeAMAwGA1UdEwEB_wQCMAAwewYDVR0gAQH_BHEwbzBtBgkrBgEEAYI3FR8wYDBeBggrBgEFBQcCAjBSHlAARgBBAEsARQAgAEYASQBEAE8AIABUAEMAUABBACAAVAByAHUAcwB0AGUAZAAgAFAAbABhAHQAZgBvAHIAbQAgAEkAZABlAG4AdABpAHQAeTAQBgNVHSUECTAHBgVngQUIAzBKBgNVHREBAf8EQDA-pDwwOjE4MA4GBWeBBQIDDAVpZDoxMzAQBgVngQUCAgwHTlBDVDZ4eDAUBgVngQUCAQwLaWQ6RkZGRkYxRDAwHwYDVR0jBBgwFoAUdOhwbuNi8U8_KoCvb3uGHTvHco0wHQYDVR0OBBYEFNiSs3HuWy41m937TQw7EyHG4L3_MHgGCCsGAQUFBwEBBGwwajBoBggrBgEFBQcwAoZcaHR0cHM6Ly9maWRvYWxsaWFuY2UuY28ubnovdHBtcGtpL05DVS1OVEMtS0VZSUQtRkY5OTAzMzhFMTg3MDc5QTZDRDZBMDNBREM1NzIzNzQ0NUY2QTQ5QS5jcnQwDQYJKoZIhvcNAQELBQADggEBAHCSnX7NtGUl1gyIRsprAS1y4TfvEfxpmsrbTruacYBDQ4z5o2uoMYYV2txkvI_pH4kxOolSS9oTz7iNGpKv1yB3x40rMRsiUNs7EyhmH7RE73DOBxlMkr1vHJudiIircI1EifC7FKiDqssKKws8apYE1BZYj6swuG2LOx1LUHd-hP473u0XEv8WbRXY3Pr1I9DODhfMkJDLUKg_l7YI2oowgathLG5_ci0Ad2EHn9122Y1StwSr0r7-cfrTwNxt2bPnZ61hkI_Em7IlCsuol0wak1Ba-UqEWDuTMRmMn3AF59rmIQ2yPdj4ae0DBnSsP13DZj8ihPT68SsaY7HiURBZBgUwggYBMIID6aADAgECAg8EV2dM14jMuwRaKXATKH8wDQYJKoZIhvcNAQELBQAwgb8xCzAJBgNVBAYTAlVTMQswCQYDVQQIDAJNWTESMBAGA1UEBwwJV2FrZWZpZWxkMRYwFAYDVQQKDA1GSURPIEFsbGlhbmNlMQwwCgYDVQQLDANDV0cxNjA0BgNVBAMMLUZJRE8gRmFrZSBUUE0gUm9vdCBDZXJ0aWZpY2F0ZSBBdXRob3JpdHkgMjAxODExMC8GCSqGSIb3DQEJARYiY29uZm9ybWFuY2UtdG9vbHNAZmlkb2FsbGlhbmNlLm9yZzAeFw0xNzAyMDEwMDAwMDBaFw0zNTAxMzEyMzU5NTlaMEExPzA9BgNVBAMTNk5DVS1OVEMtS0VZSUQtRkY5OTAzMzhFMTg3MDc5QTZDRDZBMDNBREM1NzIzNzQ0NUY2QTQ5QTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBANc-c30RpQd-_LCoiLJbXz3t_vqciOIovwjez79_DtVgi8G9Ph-tPL-lC0ueFGBMSPcKd_RDdSFe2QCYQd9e0DtiFxra-uWGa0olI1hHI7bK2GzNAZSTKEbwgqpf8vXMQ-7SPajg6PfxSOLH_Nj2yd6tkNkUSdlGtWfY8XGB3n-q--nt3UHdUQWEtgUoTe5abBXsG7MQSuTNoad3v6vk-tLd0W44ivM6pbFqFUHchx8mGLApCpjlVXrfROaCoc9E91hG9B-WNvekJ0dM6kJ658Hy7yscQ6JdqIEolYojCtWaWNmwcfv--OE1Ax_4Ub24gl3hpB9EOcBCzpb4UFmLYUECAwEAAaOCAXUwggFxMAsGA1UdDwQEAwIBhjAWBgNVHSAEDzANMAsGCSsGAQQBgjcVHzAbBgNVHSUEFDASBgkrBgEEAYI3FSQGBWeBBQgDMBIGA1UdEwEB_wQIMAYBAf8CAQAwHQYDVR0OBBYEFHTocG7jYvFPPyqAr297hh07x3KNMB8GA1UdIwQYMBaAFEMRFpma7p1QN8JP_uJbFckJMz8yMGgGA1UdHwRhMF8wXaBboFmGV2h0dHBzOi8vZmlkb2FsbGlhbmNlLmNvLm56L3RwbXBraS9jcmwvRklETyBGYWtlIFRQTSBSb290IENlcnRpZmljYXRlIEF1dGhvcml0eSAyMDE4LmNybDBvBggrBgEFBQcBAQRjMGEwXwYIKwYBBQUHMAKGU2h0dHBzOi8vZmlkb2FsbGlhbmNlLmNvLm56L3RwbXBraS9GSURPIEZha2UgVFBNIFJvb3QgQ2VydGlmaWNhdGUgQXV0aG9yaXR5IDIwMTguY3J0MA0GCSqGSIb3DQEBCwUAA4ICAQBI6GeuxIkeKcmRmFQnkPnkvSybRIJEkzWKa2f00vdBygxtzpkXF2WMHbvuMU3_K3WMFzg2xkSPjM3x_-UxOWGYgVIq8fXUdy2NhmLz4tPI65_nQXpS22rzmXFzsj4x9yS0JF2NnW5xm-O8UdckFdwIZx4Ew_zA-rIF3hqbY4Ejz2AdsbvHJo-WTpu-wWDbBQyR19eqNyYZ6vf9K8DB2JZviIDXdOpkuOJLA40MKMlnhv5K4BZs7mDZIaPzNA_MrcH3_dYXq4tIoGu5Pr1ZNCQ--93XYG1eRbvCgSDYUCRza5AgBGCIhmx2-tqLYeCd9qdy4O9R9c9qRjEThbjnGStYZ0DuB6VCaH1WjiRqyq4VNi9cv15-RoC4zswWwuHee97AAJ_Tx29w6S4Kw9DQR6A0vtw_OHLuOkGH63ns0DACf_h1MvsAMnXXX0Q0P8IpNdBQGvLvrRtRdBNx06NHY1HGZOZ9PdJ6J4mnroB2ln3cMGZG9kyRv2vbwq6sCrYZVYjo3tf4MUtkEY4FijoYbMEDK7VlbTiDPnobhkxI1-bz5DTFnR3IfVybYAeGrBCKSg2UUTPvVgM3WZ-oGlP8W9dg1347hqgxP0vLgDM6cV7rhaFC_ZAf2Et9KLRZSj7lNpJWxHxPyz9mM4w3qFwdgWKwlXl3OQtJRT4Kbs6r3gzB5WdwdWJBcmVhWQE2AAEACwAGBHIAIJ3_y_NsODrmmfuYaNxty4nXFTiEvigDkiwSQVi_rSKuABAAEAgAAAAAAAEArcc8OfVrJfMVj_e8D07tk0g5brIcLIS_BnnRwBztUetpt5zcttYQiyZUGm3y3qUVEP7_ZqtzwplfNbQUqrURlOf2JStEdsnru-ekp09_XOoSgtzwT7f8XYy_3HM-B_-9w7p3wet0GTrXXgLLMFe1jy6jAEaH7jPi0Pyx5zYLgsqQ3MYQA7lKkLaIH8GbJJ01SD8cxnH6p0OxERfQ_QDliEPGIzrE4vwds0vEjskiiBVBsMGHDxuw4ghPkCXCPn6cnUQ5xKulMW5GIAe1yuAZZjypcLl5AQ1_XoJfzGuAe1tlib2Gynr7umfCnOcvjiE6TVQ2CmwSt6isoeMiFKQdTWhjZXJ0SW5mb1it_1RDR4AXACIACxHmjtRNtTcuFCluL4Ssx4OYdRiBkh4w_CKgb4tzx5RTACBUXhu5udUi6GBvBBGsIF5MfQKIIDBdBStwWHfPWQx-FQAAAAFHcBdIVWl7S8aFYKUBc375jTRWVfsAIgALjZ3k0w--c4p2uu7urgJWOfxm0k2XJW4x9EEu0o-HzrIAIgAL_U4kZaJRRPAELcp-Gp4lh_iSA_uUtdHNVhq5vjbJ0KVoYXV0aERhdGFZAWc93EcQ6cCIsinbqJ1WMiC7Ofcimv9GWwplaxr7mor4oEEAAAAep9bZOooNEeialKbPcQcvcwAglGkWHPe88VpnNYgVBxzon_MRR9-gmgODveQ16uM_bPOkAQMDOQEAIFkBAK3HPDn1ayXzFY_3vA9O7ZNIOW6yHCyEvwZ50cAc7VHrabec3LbWEIsmVBpt8t6lFRD-_2arc8KZXzW0FKq1EZTn9iUrRHbJ67vnpKdPf1zqEoLc8E-3_F2Mv9xzPgf_vcO6d8HrdBk6114CyzBXtY8uowBGh-4z4tD8sec2C4LKkNzGEAO5SpC2iB_BmySdNUg_HMZx-qdDsREX0P0A5YhDxiM6xOL8HbNLxI7JIogVQbDBhw8bsOIIT5Alwj5-nJ1EOcSrpTFuRiAHtcrgGWY8qXC5eQENf16CX8xrgHtbZYm9hsp6-7pnwpznL44hOk1UNgpsEreorKHjIhSkHU0hQwEAAQ';

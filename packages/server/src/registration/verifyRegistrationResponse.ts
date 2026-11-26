@@ -53,6 +53,7 @@ export type VerifyRegistrationResponseOpts = Parameters<typeof verifyRegistratio
  * @param requireUserVerification **(Optional)** - Enforce user verification by the authenticator (via PIN, fingerprint, etc...) Defaults to `true`
  * @param supportedAlgorithmIDs **(Optional)** - Array of numeric COSE algorithm identifiers indicating supported public key algorithms. Import `COSEALG` from \@simplewebauthn/server/helpers for suitable values. Should be the same value that was specified for this same argument when calling `generateRegistrationOptions()`. Defaults to `[COSEALG.EdDSA, COSEALG.ES256, COSEALG.RS256]`
  * @param attestationSafetyNetEnforceCTSCheck **(Optional)** - Require that an Android device's system integrity has not been tampered with if it uses SafetyNet attestation. Defaults to `true`
+ * @param expectedAAGUIDs **(Optional)** - An allowlist of authenticator AAGUIDs (UUID strings, e.g. `"adce0002-35bc-c60a-648b-0b25f1f05503"`). When specified, registration is rejected if the authenticator's AAGUID is not in this list. Matching is case-insensitive and dashes are optional
  */
 export async function verifyRegistrationResponse(
   options: {
@@ -65,6 +66,7 @@ export async function verifyRegistrationResponse(
     requireUserVerification?: boolean;
     supportedAlgorithmIDs?: number[];
     attestationSafetyNetEnforceCTSCheck?: boolean;
+    expectedAAGUIDs?: string[];
   },
 ): Promise<VerifiedRegistrationResponse> {
   const {
@@ -77,6 +79,7 @@ export async function verifyRegistrationResponse(
     requireUserVerification = true,
     supportedAlgorithmIDs = getDefaultSupportedAlgorithmIDs(),
     attestationSafetyNetEnforceCTSCheck = true,
+    expectedAAGUIDs,
   } = options;
   const { id, rawId, type: credentialType, response: attestationResponse } = response;
 
@@ -205,6 +208,23 @@ export async function verifyRegistrationResponse(
 
   if (!aaguid) {
     throw new Error('No AAGUID was present during registration');
+  }
+
+  // Enforce the AAGUID allowlist if one was specified
+  if (expectedAAGUIDs) {
+    const normalizeAAGUID = (value: string) => value.replaceAll('-', '').toLowerCase();
+    const aaguidString = convertAAGUIDToString(aaguid);
+
+    if (
+      !expectedAAGUIDs.some((expected) =>
+        normalizeAAGUID(expected) === normalizeAAGUID(aaguidString)
+      )
+    ) {
+      const joinedExpectedAAGUIDs = expectedAAGUIDs.join(', ');
+      throw new Error(
+        `Unexpected authenticator AAGUID "${aaguidString}", expected one of: ${joinedExpectedAAGUIDs}`,
+      );
+    }
   }
 
   const decodedPublicKey = decodeCredentialPublicKey(credentialPublicKey);

@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid38827",
+  "B": "/home/dev/feedback/uid38827",
+  "sha": "308ded6732c28ad89799a76e46a9f3753b68cb15",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "MasterKale",
+    "repo": "SimpleWebAuthn",
+    "sha": "308ded6732c28ad89799a76e46a9f3753b68cb15"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "SimpleWebAuthn",
+    "cloneUrl": "https://github.com/Rrr119/SimpleWebAuthn.git"
+  },
+  "at": "2026-11-26T04:35:31.865Z"
+}
